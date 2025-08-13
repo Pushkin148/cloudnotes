@@ -1,104 +1,71 @@
-from flask import Flask, request, render_template_string, redirect, url_for
 import boto3
+from flask import Flask, request, render_template_string
+from datetime import datetime
 
 app = Flask(__name__)
 
+AWS_REGION = "us-east-1"  # Your AWS region
+
+# Initialize AWS clients with region
+s3 = boto3.client("s3", region_name=AWS_REGION)
+dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
+
 S3_BUCKET = "cloudnotes-bucket-pushkin"
-s3_client = boto3.client("s3")
+DYNAMODB_TABLE = "CloudNotesMetaData"
 
-# HTML form now includes metadata fields
-UPLOAD_FORM = """
-<!doctype html>
-<title>CloudNotes</title>
-<h1>Upload a File to CloudNotes</h1>
-<form method=post enctype=multipart/form-data>
-  <label>Student Name:</label><br>
-  <input type="text" name="studentname" required><br><br>
+table = dynamodb.Table(DYNAMODB_TABLE)
 
-  <label>Student ID:</label><br>
-  <input type="text" name="studentid" required><br><br>
-
-  <label>Class ID:</label><br>
-  <input type="text" name="classid" required><br><br>
-
-  <label>Teacher Name:</label><br>
-  <input type="text" name="teachername" required><br><br>
-
-  <label>Choose File:</label><br>
-  <input type=file name=file required><br><br>
-
-  <input type=submit value=Upload>
-</form>
-<p>{{ message }}</p>
-
-<h2>Files in CloudNotes</h2>
-<ul>
-{% for file in files %}
-  <li>
-    {{ file }}
-    - <a href="{{ url_for('download_file', filename=file) }}">Download</a>
-  </li>
-{% endfor %}
-</ul>
-"""
-
+# ---------------- Student Upload Page ----------------
 @app.route("/", methods=["GET", "POST"])
 def upload_file():
-    message = ""
     if request.method == "POST":
-        if "file" not in request.files:
-            message = "No file part"
-        else:
-            file = request.files["file"]
-            if file.filename == "":
-                message = "No file selected"
-            else:
-                try:
-                    # Collect metadata from form fields
-                    metadata = {
-                        "studentname": request.form.get("studentname"),
-                        "studentid": request.form.get("studentid"),
-                        "classid": request.form.get("classid"),
-                        "teachername": request.form.get("teachername"),
-                    }
+        file = request.files["file"]
+        if file:
+            # Upload file to S3
+            s3.upload_fileobj(file, S3_BUCKET, file.filename)
 
-                    # Upload file with metadata
-                    s3_client.upload_fileobj(
-                        file,
-                        S3_BUCKET,
-                        file.filename,
-                        ExtraArgs={"Metadata": metadata}
-                    )
-                    message = f"✅ Uploaded {file.filename} successfully!"
-                except Exception as e:
-                    message = f"❌ Upload failed: {e}"
+            # Save metadata to DynamoDB
+            metadata = {
+                "FileName": file.filename,
+                "Bucket": S3_BUCKET,
+                "ClassID": request.form.get("class_id", "unknown"),
+                "Size": len(file.read()),
+                "StudentID": request.form.get("student_id", "unknown"),
+                "StudentName": request.form.get("student_name", "unknown"),
+                "TeacherName": request.form.get("teacher_name", "unknown"),
+                "UploadTime": datetime.utcnow().isoformat()
+            }
 
-    # Fetch file list from S3
-    files = []
-    try:
-        response = s3_client.list_objects_v2(Bucket=S3_BUCKET)
-        if "Contents" in response:
-            files = [obj["Key"] for obj in response["Contents"]]
-    except Exception as e:
-        message += f" (Error listing files: {e})"
+            table.put_item(Item=metadata)
 
-    return render_template_string(UPLOAD_FORM, message=message, files=files)
+            return f"✅ Uploaded {file.filename} successfully."
 
-@app.route("/download/<filename>")
-def download_file(filename):
-    try:
-        url = s3_client.generate_presigned_url(
-            'get_object',
-            Params={
-                'Bucket': S3_BUCKET,
-                'Key': filename,
-                'ResponseContentDisposition': f'attachment; filename="{filename}"'
-            },
-            ExpiresIn=60
-        )
-        return redirect(url)
-    except Exception as e:
-        return f"❌ Download failed: {e}"
+    return '''
+        <h2>Student Assignment Upload</h2>
+        <form method="POST" enctype="multipart/form-data">
+            Student Name: <input type="text" name="student_name"><br>
+            Student ID: <input type="text" name="student_id"><br>
+            Class ID: <input type="text" name="class_id"><br>
+            Teacher Name: <input type="text" name="teacher_name"><br>
+            File: <input type="file" name="file"><br><br>
+            <input type="submit" value="Upload">
+        </form>
+    '''
+
+# ---------------- Teacher View Page ----------------
+@app.route("/teacher")
+def teacher_view():
+    response = table.scan()
+    items = response.get("Items", [])
+
+    html = "<h2>Uploaded Assignments</h2><table border='1'>"
+    html += "<tr><th>File Name</th><th>Student Name</th><th>Student ID</th><th>Class ID</th><th>Teacher Name</th><th>Upload Time</th><th>Bucket</th></tr>"
+    
+    for item in items:
+        html += f"<tr><td>{item.get('FileName')}</td><td>{item.get('StudentName')}</td><td>{item.get('StudentID')}</td><td>{item.get('ClassID')}</td><td>{item.get('TeacherName')}</td><td>{item.get('UploadTime')}</td><td>{item.get('Bucket')}</td></tr>"
+
+    html += "</table>"
+    return html
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=80)

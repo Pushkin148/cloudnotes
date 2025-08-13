@@ -1,19 +1,32 @@
 from flask import Flask, request, render_template_string, redirect, url_for
 import boto3
-import os
 
 app = Flask(__name__)
 
 S3_BUCKET = "cloudnotes-bucket-pushkin"
 s3_client = boto3.client("s3")
 
-# HTML template
+# HTML form now includes metadata fields
 UPLOAD_FORM = """
 <!doctype html>
 <title>CloudNotes</title>
 <h1>Upload a File to CloudNotes</h1>
 <form method=post enctype=multipart/form-data>
-  <input type=file name=file>
+  <label>Student Name:</label><br>
+  <input type="text" name="studentname" required><br><br>
+
+  <label>Student ID:</label><br>
+  <input type="text" name="studentid" required><br><br>
+
+  <label>Class ID:</label><br>
+  <input type="text" name="classid" required><br><br>
+
+  <label>Teacher Name:</label><br>
+  <input type="text" name="teachername" required><br><br>
+
+  <label>Choose File:</label><br>
+  <input type=file name=file required><br><br>
+
   <input type=submit value=Upload>
 </form>
 <p>{{ message }}</p>
@@ -41,8 +54,22 @@ def upload_file():
                 message = "No file selected"
             else:
                 try:
-                    s3_client.upload_fileobj(file, S3_BUCKET, file.filename)
-                    message = f"✅ Uploaded {file.filename} to S3 bucket {S3_BUCKET}"
+                    # Collect metadata from form fields
+                    metadata = {
+                        "studentname": request.form.get("studentname"),
+                        "studentid": request.form.get("studentid"),
+                        "classid": request.form.get("classid"),
+                        "teachername": request.form.get("teachername"),
+                    }
+
+                    # Upload file with metadata
+                    s3_client.upload_fileobj(
+                        file,
+                        S3_BUCKET,
+                        file.filename,
+                        ExtraArgs={"Metadata": metadata}
+                    )
+                    message = f"✅ Uploaded {file.filename} successfully!"
                 except Exception as e:
                     message = f"❌ Upload failed: {e}"
 
@@ -60,7 +87,6 @@ def upload_file():
 @app.route("/download/<filename>")
 def download_file(filename):
     try:
-        # Generate a pre-signed URL for downloading with forced attachment
         url = s3_client.generate_presigned_url(
             'get_object',
             Params={
@@ -68,14 +94,11 @@ def download_file(filename):
                 'Key': filename,
                 'ResponseContentDisposition': f'attachment; filename="{filename}"'
             },
-            ExpiresIn=60  # URL valid for 60 seconds
+            ExpiresIn=60
         )
         return redirect(url)
     except Exception as e:
         return f"❌ Download failed: {e}"
 
-
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=80)
-
-
